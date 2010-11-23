@@ -1,10 +1,37 @@
+-- written by slime
+
 local gkpc = gkinterface.GKProcessCommand
 local getradar = radar.GetRadarSelectionID
 local setradar = radar.SetRadarSelection
 local objectpos = Game.GetObjectAtScreenPos
 
+-- Targetless compatability
+local function hastargetless()
+	return assert(function() return targetless end)
+end
+local function targetless_off()
+	if hastargetless() then
+		targetless.var.scanlock = true
+		targetless.api.radarlock = true
+		targetless.var.lock = true
+		return true
+	end
+end
+local function targetless_on()
+	if hastargetless() then
+		targetless.api.radarlock = false
+		targetless.var.lock = false
+		targetless.var.scanlock = false
+		return true
+	end
+end
 
-TargetTools = {ReTarget={target={0,0}, active=gkini.ReadString("targettools", "retarget", "ON")=="ON"}}
+
+TargetTools = {}
+TargetTools.ReTarget = {
+	target={0,0},
+	active=gkini.ReadString("targettools", "retarget", "ON") == "ON",
+}
 
 
 function TargetTools.ReTarget:OnEvent(event, type)
@@ -22,10 +49,18 @@ RegisterEvent(TargetTools.ReTarget, "HUD_SHOW")
 
 function TargetTools.SendTarget(channel)
 	if GetTargetInfo() then
-		local formatstr = "Targeting %s (%d), \"%s\", at %dm"
+		local formatstr = "Targeting %s (%d%%), \"%s\", at %dm"
 		local nohealthformatstr = "Targeting %s"
 		local name, health, distance, factionid, guild, ship = GetTargetInfo()
-		local str = health and formatstr:format(Article(ship), math.floor(health*100), name, math.floor(distance)) or formatstr:format(name)
+		if guild and guild ~= "" then
+			name = "["..guild.."] "..name
+		end
+		local str
+		if health then
+			str = formatstr:format(Article(ship), math.floor(health*100), name, math.floor(distance))
+		else
+			str = nohealthformatstr:format(name)
+		end
 		SendChat(str, channel:upper())
 	end
 end
@@ -33,7 +68,7 @@ end
 
 function TargetTools.ReadyAtDist(channel)
 	if GetTargetInfo() then
-		local name, health, distance = GetTargetInfo()
+		local name, health, distance, factionid, guild, ship = GetTargetInfo()
 		SendChat("Ready at ".. math.floor(distance) .."m from \""..name.."\"", channel:upper())
 	end
 end
@@ -80,31 +115,37 @@ function TargetTools.TargetTurret(rev) -- this way isn't the best
 	if not nodeid then return end
 	local repmin, repmax = 1, 400
 	if rev then repmin, repmax = repmin*-1, repmax*-1 end
+	targetless_off()
 	for rep = repmin, repmax, skip do
 		setradar(nodeid, objectid+rep)
 		childnode, childobject = getradar()
 		if childobject ~= objectid then break end
 	end
+	targetless_on()
 	if childobject == objectid then TargetTools.TargetParent() end
 end
-
-
---[[function TargetTools.TargetTurret(rev, stop) -- doesn't work :(
-	if stop then return end
-	local node, object = getradar()
-	if not node then TargetTools.TargetFront(true, rev) return end
-	gkpc(rev and "LocalRadarPrev" or "LocalRadarNext")
-	local nextnode, nextobject = getradar()
-	if not nextnode then
-		local parentobject = GetPrimaryShipIDOfPlayer(GetCharacterID(node))
-		parentobject = parentobject or object
-		setradar(node, parentobject)
-	end
-end]]
 
 RegisterUserCommand("TargetNextTurret", TargetTools.TargetTurret)
 RegisterUserCommand("TargetPrevTurret", function() TargetTools.TargetTurret(true) end)
 
+
+function TargetTools.GetLocalObjects(charid)
+	if not charid then return end
+	local nodeid, objectid = GetPlayerNodeID(charid), GetPrimaryShipIDOfPlayer(charid)
+	if not nodeid or not objectid then return end
+	local localobjects = {}
+	targetless_off()
+	setradar(nodeid, objectid)
+	while true do
+		gkpc("LocalRadarNext")
+		local nextnode, nextobject = getradar()
+		if not nextnode then break end
+		local name, health, dist = GetTargetInfo()
+		table.insert(localobjects, {nodeid=nextnode, objectid=nextobject, dist=dist})
+	end
+	targetless_on()
+	return localobjects
+end
 
 function TargetTools.TargetFront(targetturret, reverse) -- relatively slow and doesn't catch objects which aren't very big on the screen
 	gkpc("RadarNone")
@@ -157,7 +198,7 @@ function TargetTools.TargetPlayer(name)
 	local function IsPlayerName(charid)
 		if GetPlayerName(charid):lower():match(name) then
 			local distance = GetPlayerDistance(charid)
-			if charid == GetCharacterID() then distance = 10000 end
+			if charid == GetCharacterID() then distance = 10000 end -- sort last
 			if distance then
 				table.insert(ships, {distance=distance, node=GetPlayerNodeID(charid), object=GetPrimaryShipIDOfPlayer(charid)})
 			end
@@ -169,7 +210,7 @@ function TargetTools.TargetPlayer(name)
 	setradar(ships[1].node, ships[1].object)
 end
 
-RegisterUserCommand("TargetPlayer", function(unused, data)
+RegisterUserCommand("TargetPlayer", function(_, data)
 	if data then
 		TargetTools.TargetPlayer(table.concat(data, " "))
 	else
@@ -180,15 +221,23 @@ end)
 
 function TargetTools.TargetCargo(type)
 	type = type:lower()
-	local timer = Timer()
-	if GetTargetInfo() and not GetTargetInfo():lower():match(type) then gkpc("RadarNone") end
-	local function nextcargo()
+	local _name = GetTargetInfo()
+	if _name and not _name:lower():match(type) then gkpc("RadarNone") end
+	targetless_off()
+	local found = false
+	repeat
 		gkpc("RadarNext")
 		local name = GetTargetInfo()
-		if not name then return elseif name:lower():match(type) then return end
-		timer:SetTimeout(10)
-	end
-	timer:SetTimeout(1, nextcargo)
+		if not name then
+			print("\127ff0000\""..type.."\" is not in range")
+			break
+		end
+		local nodeid, objectid = getradar()
+		if nodeid == 2 and name ~= "Asteroid" and name ~= "Ice Crystal" and name:lower():match(type) then
+			found = true
+		end
+	until found
+	targetless_on()
 end
 
 RegisterUserCommand("TargetCargo", function(_, data)
@@ -198,17 +247,6 @@ RegisterUserCommand("TargetCargo", function(_, data)
 		TargetTools.TargetCargo(".")
 	end
 end)
-
-
-local loadedtext = "*** TargetTools loaded."
-
-function TargetTools:OnEvent(event, data, ...)
-	if event == "PLAYER_ENTERED_GAME" then
-		purchaseprint(loadedtext)
-		UnregisterEvent(self, "PLAYER_ENTERED_GAME")
-	end
-end
-RegisterEvent(TargetTools, "PLAYER_ENTERED_GAME")
 
 
 dofile("ui.lua")
