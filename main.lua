@@ -4,30 +4,50 @@ local gkpc = gkinterface.GKProcessCommand
 local getradar = radar.GetRadarSelectionID
 local setradar = radar.SetRadarSelection
 local objectpos = Game.GetObjectAtScreenPos
+local floor = math.floor
+
 
 -- Targetless compatability
-local function hastargetless()
-	return assert(function() return targetless end)
+local hastargetless = false
+local function targetless_exists()
+	return pcall(function() return targetless end)
 end
+
 local function targetless_off()
-	if hastargetless() then
+	if hastargetless then
 		targetless.var.scanlock = true
 		targetless.api.radarlock = true
 		targetless.var.lock = true
 		return true
 	end
+	return false
 end
 local function targetless_on()
-	if hastargetless() then
+	if hastargetless then
 		targetless.api.radarlock = false
 		targetless.var.lock = false
 		targetless.var.scanlock = false
 		return true
 	end
+	return false
+end
+
+-- "local function foo()" is equivalent to "local foo; foo = function()",
+-- so we can reference the function name in the function body properly.
+local function targetless_check()
+	UnregisterEvent(targetless_check, "START")
+	UnregisterEvent(targetless_check, "PLAYER_ENTERED_GAME")
+	hastargetless = targetless_exists()
+end
+
+hastargetless = targetless_exists()
+if not hastargetless then
+	RegisterEvent(targetless_check, "START")
+	RegisterEvent(targetless_check, "PLAYER_ENTERED_GAME")
 end
 
 
-TargetTools = {}
+declare("TargetTools", {})
 TargetTools.ReTarget = {
 	target={0,0},
 	active=gkini.ReadString("targettools", "retarget", "ON") == "ON",
@@ -49,17 +69,17 @@ RegisterEvent(TargetTools.ReTarget, "HUD_SHOW")
 
 function TargetTools.SendTarget(channel)
 	if GetTargetInfo() then
-		local formatstr = "Targeting %s (%d%%), \"%s\", at %dm"
-		local nohealthformatstr = "Targeting %s"
+		local formatstr = "Targeting %s (%d%%, %s), \"%s\", at %dm"
+		local nohealthformatstr = "Targeting %s at %dm"
 		local name, health, distance, factionid, guild, ship = GetTargetInfo()
 		if guild and guild ~= "" then
 			name = "["..guild.."] "..name
 		end
 		local str
-		if health then
-			str = formatstr:format(Article(ship), math.floor(health*100), name, math.floor(distance))
+		if health and ship and factionid then
+			str = formatstr:format(Article(ship), floor(health*100), FactionName[factionid], name, floor(distance))
 		else
-			str = nohealthformatstr:format(name)
+			str = nohealthformatstr:format(name, floor(distance))
 		end
 		SendChat(str, channel:upper())
 	end
@@ -69,7 +89,7 @@ end
 function TargetTools.ReadyAtDist(channel)
 	if GetTargetInfo() then
 		local name, health, distance, factionid, guild, ship = GetTargetInfo()
-		SendChat("Ready at ".. math.floor(distance) .."m from \""..name.."\"", channel:upper())
+		SendChat("Ready at ".. floor(distance) .."m from \""..name.."\"", channel:upper())
 	end
 end
 
@@ -110,19 +130,39 @@ RegisterUserCommand("TargetParent", TargetTools.TargetParent)
 function TargetTools.TargetTurret(rev) -- this way isn't the best
 	local skip = 1
 	local nodeid, objectid = getradar()
-	if not nodeid then TargetTools.TargetFront() return end
-	local childnode, childobject
-	if not nodeid then return end
-	local repmin, repmax = 1, 400
-	if rev then repmin, repmax = repmin*-1, repmax*-1 end
+	
+	if not nodeid then
+		-- We can't target an object's turrets if we aren't targeting an object.
+		TargetTools.TargetFront()
+		return
+	end
+	
+	-- Disable targetless functionality while we scan.
 	targetless_off()
+	
+	local childnode, childobject
+	local repmin, repmax = 1, 400
+	if rev then
+		-- Reverse the scan.
+		repmin, repmax = repmin*-1, repmax*-1
+	end
+	
 	for rep = repmin, repmax, skip do
 		setradar(nodeid, objectid+rep)
 		childnode, childobject = getradar()
-		if childobject ~= objectid then break end
+		
+		-- Stop at the first valid object (getradar returns a different objectid from our original target.)
+		if childobject ~= objectid then
+			break
+		end
 	end
+	
+	-- Re-enable targetless functionality when we're done scanning.
 	targetless_on()
-	if childobject == objectid then TargetTools.TargetParent() end
+	
+	if childobject == objectid then
+		TargetTools.TargetParent()
+	end
 end
 
 RegisterUserCommand("TargetNextTurret", TargetTools.TargetTurret)
@@ -147,7 +187,8 @@ function TargetTools.GetLocalObjects(charid)
 	return localobjects
 end
 
-function TargetTools.TargetFront(targetturret, reverse) -- relatively slow and doesn't catch objects which aren't very big on the screen
+-- Slow and doesn't catch objects which aren't very big on the screen.
+function TargetTools.TargetFront(targetturret, reverse)
 	gkpc("RadarNone")
 	for y=0.5, 0.45, -0.002 do
 		for x=0.5, 0.45, -0.002 do
@@ -159,7 +200,9 @@ function TargetTools.TargetFront(targetturret, reverse) -- relatively slow and d
 			if objectpos(x,y) then setradar(objectpos(x,y)) return x,y end
 		end
 	end
-	if targetturret then TargetTools.TargetTurret(reverse, true) end
+	if targetturret then
+		TargetTools.TargetTurret(reverse, true)
+	end
 end
 RegisterUserCommand("TargetFront", TargetTools.TargetFront)
 
